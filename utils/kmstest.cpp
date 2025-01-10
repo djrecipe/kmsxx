@@ -410,6 +410,10 @@ static const char* usage_str =
 	"      --flip[=max]          Do page flipping for each output with an optional maximum flips count\n"
 	"      --sync                Synchronize page flipping\n"
 	"      --crc                 Print CRC16 for framebuffer contents\n"
+	"      --modetest            Test all available modes, in sequence\n"
+	"      --fallbacktest        Try a preset list of modes and determine the first supported mode\n"
+	// TODO 1/10/25: complete manual mode adjustment
+	"      --manualmode          Manually determine mode based on user input and visual feedback\n"
 	"\n"
 	"<connector>, <crtc> and <plane> can be given by index (<idx>) or id (@<id>).\n"
 	"<connector> can also be given by name.\n"
@@ -535,6 +539,12 @@ static vector<Arg> parse_cmdline(int argc, char** argv)
 	return args;
 }
 
+static vector<Videomode> modes GetFallbackModes()
+{
+	Videmode mode;
+	// TODO 1/10/25: create a list of basic resolutions and refresh rates and return those
+}
+
 static vector<OutputInfo> setups_to_outputs(Card& card, ResourceManager& resman, const vector<Arg>& output_args)
 {
 	vector<OutputInfo> outputs;
@@ -640,8 +650,19 @@ static vector<OutputInfo> setups_to_outputs(Card& card, ResourceManager& resman,
 		for (Connector* conn : card.get_connectors()) {
 			if (!conn->connected())
 				continue;
-
-			if(s_try_all_modes) {
+			if(s_try_fallback_modes) {
+				auto modes = GetFallbackModes();
+				for (unsigned i = 0; i < modes.size(); ++i) {
+					OutputInfo output = {};
+					output.connector = resman.reserve_connector(conn);
+					EXIT_IF(!output.connector, "Failed to reserve connector %s", conn->fullname().c_str());
+					output.crtc = resman.reserve_crtc(conn);
+					EXIT_IF(!output.crtc, "Failed to reserve crtc for %s", conn->fullname().c_str());
+					output.mode = modes[i];
+					outputs.push_back(output);
+				}
+			}
+			else if(s_try_all_modes) {
 				auto modes = conn->get_modes();
 				for (unsigned i = 0; i < modes.size(); ++i) {
 					OutputInfo output = {};
