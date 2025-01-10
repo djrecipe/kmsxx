@@ -71,6 +71,7 @@ static bool s_cvt_vid_opt;
 static unsigned s_max_flips;
 static bool s_print_crc;
 static bool s_try_all_modes;
+static bool s_try_fallback_modes;
 
 __attribute__((unused)) static void print_regex_match(smatch sm)
 {
@@ -487,6 +488,9 @@ static vector<Arg> parse_cmdline(int argc, char** argv)
 		}),
 		Option("|modetest", []() {
 			s_try_all_modes = true;
+		}),
+		Option("|fallbacktest", []() {
+			s_try_fallback_modes = true;
 		}),
 		Option("|cea", []() {
 			s_use_cea = true;
