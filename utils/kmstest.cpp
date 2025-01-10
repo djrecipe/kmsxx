@@ -70,6 +70,7 @@ static bool s_cvt_v2;
 static bool s_cvt_vid_opt;
 static unsigned s_max_flips;
 static bool s_print_crc;
+static bool s_try_all_modes;
 
 __attribute__((unused)) static void print_regex_match(smatch sm)
 {
@@ -484,6 +485,9 @@ static vector<Arg> parse_cmdline(int argc, char** argv)
 		Option("|dmt", []() {
 			s_use_dmt = true;
 		}),
+		Option("|modetest", []() {
+			s_try_all_modes = true;
+		}),
 		Option("|cea", []() {
 			s_use_cea = true;
 		}),
@@ -633,14 +637,28 @@ static vector<OutputInfo> setups_to_outputs(Card& card, ResourceManager& resman,
 			if (!conn->connected())
 				continue;
 
-			OutputInfo output = {};
-			output.connector = resman.reserve_connector(conn);
-			EXIT_IF(!output.connector, "Failed to reserve connector %s", conn->fullname().c_str());
-			output.crtc = resman.reserve_crtc(conn);
-			EXIT_IF(!output.crtc, "Failed to reserve crtc for %s", conn->fullname().c_str());
-			output.mode = output.connector->get_default_mode();
+			if(s_try_all_modes) {
+				auto modes = conn->get_modes();
+				for (unsigned i = 0; i < modes.size(); ++i) {
+					OutputInfo output = {};
+					output.connector = resman.reserve_connector(conn);
+					EXIT_IF(!output.connector, "Failed to reserve connector %s", conn->fullname().c_str());
+					output.crtc = resman.reserve_crtc(conn);
+					EXIT_IF(!output.crtc, "Failed to reserve crtc for %s", conn->fullname().c_str());
+					output.mode = modes[i];
+					outputs.push_back(output);
+				}
 
-			outputs.push_back(output);
+			}
+			else {
+				OutputInfo output = {};
+				output.connector = resman.reserve_connector(conn);
+				EXIT_IF(!output.connector, "Failed to reserve connector %s", conn->fullname().c_str());
+				output.crtc = resman.reserve_crtc(conn);
+				EXIT_IF(!output.crtc, "Failed to reserve crtc for %s", conn->fullname().c_str());
+				output.mode = output.connector->get_default_mode();
+				outputs.push_back(output);
+			}
 		}
 	}
 
@@ -727,55 +745,63 @@ static string fb_crc(IFramebuffer* fb)
 	return fmt::format("{:#06x} {:#06x} {:#06x}", r, g, b);
 }
 
+static void print_output(const OutputInfo& o)
+{
+	fmt::print("Connector {}/@{}: {}", o.connector->idx(), o.connector->id(),
+		   o.connector->fullname());
+
+	for (const PropInfo& prop : o.conn_props)
+		fmt::print(" {}={}", prop.prop->name(), prop.val);
+
+	fmt::print("\n  Crtc {}/@{}", o.crtc->idx(), o.crtc->id());
+
+	for (const PropInfo& prop : o.crtc_props)
+		fmt::print(" {}={}", prop.prop->name(), prop.val);
+
+	fmt::print(": {}\n", o.mode.to_string_long());
+
+	if (!o.legacy_fbs.empty()) {
+		auto fb = o.legacy_fbs[0];
+		fmt::print("    Fb {} {}x{}-{}\n", fb->id(), fb->width(), fb->height(), PixelFormatToFourCC(fb->format()));
+	}
+
+	for (unsigned j = 0; j < o.planes.size(); ++j) {
+		const PlaneInfo& p = o.planes[j];
+		auto fb = p.fbs[0];
+		fmt::print("  Plane {}/@{}: {},{}-{}x{}", p.plane->idx(), p.plane->id(),
+			   p.x, p.y, p.w, p.h);
+		for (const PropInfo& prop : p.props)
+			fmt::print(" {}={}", prop.prop->name(), prop.val);
+		fmt::print("\n");
+
+		fmt::print("    Fb {} {}x{}-{}\n", fb->id(), fb->width(), fb->height(),
+			   PixelFormatToFourCC(fb->format()));
+		if (s_print_crc)
+			fmt::print("      CRC16 {}\n", fb_crc(fb).c_str());
+	}
+}
+
 static void print_outputs(const vector<OutputInfo>& outputs)
 {
 	for (unsigned i = 0; i < outputs.size(); ++i) {
-		const OutputInfo& o = outputs[i];
-
-		fmt::print("Connector {}/@{}: {}", o.connector->idx(), o.connector->id(),
-			   o.connector->fullname());
-
-		for (const PropInfo& prop : o.conn_props)
-			fmt::print(" {}={}", prop.prop->name(), prop.val);
-
-		fmt::print("\n  Crtc {}/@{}", o.crtc->idx(), o.crtc->id());
-
-		for (const PropInfo& prop : o.crtc_props)
-			fmt::print(" {}={}", prop.prop->name(), prop.val);
-
-		fmt::print(": {}\n", o.mode.to_string_long());
-
-		if (!o.legacy_fbs.empty()) {
-			auto fb = o.legacy_fbs[0];
-			fmt::print("    Fb {} {}x{}-{}\n", fb->id(), fb->width(), fb->height(), PixelFormatToFourCC(fb->format()));
-		}
-
-		for (unsigned j = 0; j < o.planes.size(); ++j) {
-			const PlaneInfo& p = o.planes[j];
-			auto fb = p.fbs[0];
-			fmt::print("  Plane {}/@{}: {},{}-{}x{}", p.plane->idx(), p.plane->id(),
-				   p.x, p.y, p.w, p.h);
-			for (const PropInfo& prop : p.props)
-				fmt::print(" {}={}", prop.prop->name(), prop.val);
-			fmt::print("\n");
-
-			fmt::print("    Fb {} {}x{}-{}\n", fb->id(), fb->width(), fb->height(),
-				   PixelFormatToFourCC(fb->format()));
-			if (s_print_crc)
-				fmt::print("      CRC16 {}\n", fb_crc(fb).c_str());
-		}
+		print_output(outputs[i]);
 	}
+}
+
+static void draw_test_pattern(const OutputInfo& o)
+{
+	for (auto fb : o.legacy_fbs)
+		draw_test_pattern(*fb);
+
+	for (const PlaneInfo& p : o.planes)
+		for (auto fb : p.fbs)
+			draw_test_pattern(*fb);
 }
 
 static void draw_test_patterns(const vector<OutputInfo>& outputs)
 {
 	for (const OutputInfo& o : outputs) {
-		for (auto fb : o.legacy_fbs)
-			draw_test_pattern(*fb);
-
-		for (const PlaneInfo& p : o.planes)
-			for (auto fb : p.fbs)
-				draw_test_pattern(*fb);
+		draw_test_pattern(o);
 	}
 }
 
@@ -826,6 +852,54 @@ static void set_crtcs_n_planes_legacy(Card& card, const vector<OutputInfo>& outp
 				fmt::print(stderr, "crtc->set_plane() failed for plane {}: {}\n",
 					   p.plane->id(), strerror(-r));
 		}
+	}
+}
+
+static void set_crtcs_n_planes_legacy(Card& card, OutputInfo o)
+{
+	// Disable unused crtcs
+	for (Crtc* crtc : card.get_crtcs()) {
+		if (o.crtc == crtc)
+			continue;
+
+		crtc->disable_mode();
+	}
+
+	int r;
+	auto conn = o.connector;
+	auto crtc = o.crtc;
+
+	for (const PropInfo& prop : o.conn_props) {
+		r = conn->set_prop_value(prop.prop, prop.val);
+		EXIT_IF(r, "failed to set connector property %s\n", prop.name.c_str());
+	}
+
+	for (const PropInfo& prop : o.crtc_props) {
+		r = crtc->set_prop_value(prop.prop, prop.val);
+		EXIT_IF(r, "failed to set crtc property %s\n", prop.name.c_str());
+	}
+
+	if (!o.legacy_fbs.empty()) {
+		auto fb = o.legacy_fbs[0];
+		r = crtc->set_mode(conn, *fb, o.mode);
+		if (r)
+			fmt::print(stderr, "crtc->set_mode() failed for crtc {}: {}\n",
+				   crtc->id(), strerror(-r));
+	}
+
+	for (const PlaneInfo& p : o.planes) {
+		for (const PropInfo& prop : p.props) {
+			r = p.plane->set_prop_value(prop.prop, prop.val);
+			EXIT_IF(r, "failed to set plane property %s\n", prop.name.c_str());
+		}
+
+		auto fb = p.fbs[0];
+		r = crtc->set_plane(p.plane, *fb,
+					p.x, p.y, p.w, p.h,
+					0, 0, fb->width(), fb->height());
+		if (r)
+			fmt::print(stderr, "crtc->set_plane() failed for plane {}: {}\n",
+				   p.plane->id(), strerror(-r));
 	}
 }
 
@@ -917,12 +991,106 @@ static void set_crtcs_n_planes_atomic(Card& card, const vector<OutputInfo>& outp
 		EXIT("Atomic commit failed: %d\n", r);
 }
 
+static void set_crtcs_n_planes_atomic(Card& card, OutputInfo o)
+{
+	int r;
+
+	// XXX DRM framework doesn't allow moving an active plane from one crtc to another.
+	// See drm_atomic.c::plane_switching_crtc().
+	// For the time being, try and disable all crtcs and planes here.
+	// Do not check the return value as some simple displays don't support the crtc being
+	// enabled but the primary plane being disabled.
+
+	AtomicReq disable_req(card);
+
+	// Disable unused crtcs
+	for (Crtc* crtc : card.get_crtcs()) {
+		//if (find_if(outputs.begin(), outputs.end(), [crtc](const OutputInfo& o) { return o.crtc == crtc; }) != outputs.end())
+		//	continue;
+
+		disable_req.add(crtc, {
+					      { "ACTIVE", 0 },
+				      });
+	}
+
+	// Disable unused planes
+	for (Plane* plane : card.get_planes())
+		disable_req.add(plane, {
+					       { "FB_ID", 0 },
+					       { "CRTC_ID", 0 },
+				       });
+
+	disable_req.commit_sync(true);
+
+	// Keep blobs here so that we keep ref to them until we have committed the req
+	vector<unique_ptr<Blob>> blobs;
+
+	AtomicReq req(card);
+
+	auto conn = o.connector;
+	auto crtc = o.crtc;
+
+	blobs.emplace_back(o.mode.to_blob(card));
+	Blob* mode_blob = blobs.back().get();
+
+	req.add(conn, {
+				  { "CRTC_ID", crtc->id() },
+			  });
+
+	for (const PropInfo& prop : o.conn_props)
+		req.add(conn, prop.prop, prop.val);
+
+	req.add(crtc, {
+				  { "ACTIVE", 1 },
+				  { "MODE_ID", mode_blob->id() },
+			  });
+
+	for (const PropInfo& prop : o.crtc_props)
+		req.add(crtc, prop.prop, prop.val);
+
+	for (const PlaneInfo& p : o.planes) {
+		auto fb = p.fbs[0];
+
+		req.add(p.plane, {
+					 { "FB_ID", fb->id() },
+					 { "CRTC_ID", crtc->id() },
+					 { "SRC_X", (p.view_x ?: 0) << 16 },
+					 { "SRC_Y", (p.view_y ?: 0) << 16 },
+					 { "SRC_W", (p.view_w ?: fb->width()) << 16 },
+					 { "SRC_H", (p.view_h ?: fb->height()) << 16 },
+					 { "CRTC_X", p.x },
+					 { "CRTC_Y", p.y },
+					 { "CRTC_W", p.w },
+					 { "CRTC_H", p.h },
+				 });
+
+		for (const PropInfo& prop : p.props)
+			req.add(p.plane, prop.prop, prop.val);
+	}
+
+	r = req.test(true);
+	if (r)
+		EXIT("Atomic test failed: %d\n", r);
+
+	r = req.commit_sync(true);
+	if (r)
+		EXIT("Atomic commit failed: %d\n", r);
+}
+
 static void set_crtcs_n_planes(Card& card, const vector<OutputInfo>& outputs)
 {
 	if (card.has_atomic())
 		set_crtcs_n_planes_atomic(card, outputs);
 	else
 		set_crtcs_n_planes_legacy(card, outputs);
+}
+
+static void set_crtcs_n_planes(Card& card, OutputInfo output)
+{
+	if (card.has_atomic())
+		set_crtcs_n_planes_atomic(card, output);
+	else
+		set_crtcs_n_planes_legacy(card, output);
 }
 
 static bool max_flips_reached;
@@ -1134,14 +1302,26 @@ int main(int argc, char** argv)
 
 	vector<OutputInfo> outputs = setups_to_outputs(card, resman, output_args);
 
-	if (!s_flip_mode)
-		draw_test_patterns(outputs);
 
-	print_outputs(outputs);
+    if(s_try_all_modes) {
+		for (const OutputInfo& o : outputs) {
+			print_output(o);
+			fmt::print("\n...press ENTER to test mode\n");
+			getchar();
+			draw_test_pattern(o);
+			set_crtcs_n_planes(card, o);
+		}
+	}
+	else {
+		if (!s_flip_mode)
+			draw_test_patterns(outputs);
 
-	set_crtcs_n_planes(card, outputs);
+		print_outputs(outputs);
+	
+		set_crtcs_n_planes(card, outputs);
+	}
 
-	fmt::print("press enter to exit\n");
+	fmt::print("\n...press ENTER to exit\n");
 
 	if (s_flip_mode)
 		main_flip(card, outputs);
