@@ -806,7 +806,8 @@ static void print_output(const OutputInfo& o)
 	for (const PropInfo& prop : o.conn_props)
 		fmt::print(" {}={}", prop.prop->name(), prop.val);
 
-	fmt::print("\n  Crtc {}/@{}", o.crtc->idx(), o.crtc->id());
+	if(o.crtc)
+		fmt::print("\n  Crtc {}/@{}", o.crtc->idx(), o.crtc->id());
 
 	for (const PropInfo& prop : o.crtc_props)
 		fmt::print(" {}={}", prop.prop->name(), prop.val);
@@ -1369,12 +1370,9 @@ int main(int argc, char** argv)
 	}
 	else {
 		PrepareOutputs(card, resman, outputs);
-		
+		print_outputs(outputs);
 		if (!s_flip_mode)
 			draw_test_patterns(outputs);
-
-		print_outputs(outputs);
-	
 		set_crtcs_n_planes(card, outputs);
 	}
 
