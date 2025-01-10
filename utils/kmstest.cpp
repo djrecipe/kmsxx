@@ -14,6 +14,7 @@
 #include <kms++/kms++.h>
 #include <kms++/modedb.h>
 #include <kms++/mode_cvt.h>
+#include <kms++/videomode.h>
 
 #include <kms++util/kms++util.h>
 
@@ -539,10 +540,75 @@ static vector<Arg> parse_cmdline(int argc, char** argv)
 	return args;
 }
 
-static vector<Videomode> modes GetFallbackModes()
+static vector<Videomode> GetFallbackModes()
 {
-	Videmode mode;
-	// TODO 1/10/25: create a list of basic resolutions and refresh rates and return those
+	vector<Videomode> modes;
+	modes.push_back(videomode_from_cvt(640, 480, 60, 0, 0, 0));
+	modes.push_back(videomode_from_cvt(800, 600, 60, 0, 0, 0));
+	modes.push_back(videomode_from_cvt(1024, 768, 60, 0, 0, 0));
+	modes.push_back(videomode_from_cvt(1152, 720, 60, 0, 0, 0));
+	modes.push_back(videomode_from_cvt(1280, 720, 60, 0, 0, 0));
+	modes.push_back(videomode_from_cvt(1024, 1024, 60, 0, 0, 0));
+	modes.push_back(videomode_from_cvt(1440, 960, 60, 0, 0, 0));
+	modes.push_back(videomode_from_cvt(1680, 1050, 60, 0, 0, 0));
+	modes.push_back(videomode_from_cvt(1920, 1080, 60, 0, 0, 0));
+	modes.push_back(videomode_from_cvt(2560, 1600, 60, 0, 0, 0));
+	return modes;
+}
+
+static void PrepareOutput(Card& card, ResourceManager& resman, OutputInfo& o)
+{
+	get_props(card, o.conn_props, o.connector);
+
+	if (!o.crtc)
+		get_default_crtc(resman, o);
+
+	get_props(card, o.crtc_props, o.crtc);
+
+	if (!o.mode.valid())
+		EXIT("Mode not valid for %s", o.connector->fullname().c_str());
+
+	if (card.has_atomic()) {
+		if (o.planes.empty())
+			add_default_planeinfo(&o);
+	} else {
+		if (o.legacy_fbs.empty())
+			o.legacy_fbs = get_default_fb(card, o.mode.hdisplay, o.mode.vdisplay);
+	}
+
+	for (PlaneInfo& p : o.planes) {
+		if (p.fbs.empty())
+			p.fbs = get_default_fb(card, p.w, p.h);
+	}
+
+	for (PlaneInfo& p : o.planes) {
+		if (!p.plane) {
+			if (card.has_atomic())
+				p.plane = resman.reserve_generic_plane(o.crtc, p.fbs[0]->format());
+			else
+				p.plane = resman.reserve_overlay_plane(o.crtc, p.fbs[0]->format());
+
+			if (!p.plane)
+				EXIT("Failed to find available plane for %s", o.mode.to_string_long().c_str());
+		}
+		get_props(card, p.props, p.plane);
+	}
+}
+
+static void ReleaseOutput(Card& card, ResourceManager& resman, OutputInfo& o)
+{
+	for (PlaneInfo& p : o.planes) {
+		if (p.plane) {
+			resman.release_plane(p.plane);
+		}
+	}
+}
+
+static void PrepareOutputs(Card& card, ResourceManager& resman, vector<OutputInfo> outputs)
+{
+	for (OutputInfo& o : outputs) {
+		PrepareOutput(card, resman, o);
+	}
 }
 
 static vector<OutputInfo> setups_to_outputs(Card& card, ResourceManager& resman, const vector<Arg>& output_args)
@@ -650,14 +716,16 @@ static vector<OutputInfo> setups_to_outputs(Card& card, ResourceManager& resman,
 		for (Connector* conn : card.get_connectors()) {
 			if (!conn->connected())
 				continue;
+			auto conn_res = resman.reserve_connector(conn);
+			EXIT_IF(!conn_res, "Failed to reserve connector %s", conn->fullname().c_str());
+			auto crtc_res = resman.reserve_crtc(conn);
+			EXIT_IF(!crtc_res, "Failed to reserve crtc for %s", conn->fullname().c_str());
 			if(s_try_fallback_modes) {
 				auto modes = GetFallbackModes();
 				for (unsigned i = 0; i < modes.size(); ++i) {
 					OutputInfo output = {};
-					output.connector = resman.reserve_connector(conn);
-					EXIT_IF(!output.connector, "Failed to reserve connector %s", conn->fullname().c_str());
-					output.crtc = resman.reserve_crtc(conn);
-					EXIT_IF(!output.crtc, "Failed to reserve crtc for %s", conn->fullname().c_str());
+					output.connector = conn_res;
+					output.crtc = crtc_res;
 					output.mode = modes[i];
 					outputs.push_back(output);
 				}
@@ -666,10 +734,8 @@ static vector<OutputInfo> setups_to_outputs(Card& card, ResourceManager& resman,
 				auto modes = conn->get_modes();
 				for (unsigned i = 0; i < modes.size(); ++i) {
 					OutputInfo output = {};
-					output.connector = resman.reserve_connector(conn);
-					EXIT_IF(!output.connector, "Failed to reserve connector %s", conn->fullname().c_str());
-					output.crtc = resman.reserve_crtc(conn);
-					EXIT_IF(!output.crtc, "Failed to reserve crtc for %s", conn->fullname().c_str());
+					output.connector = conn_res;
+					output.crtc = crtc_res;
 					output.mode = modes[i];
 					outputs.push_back(output);
 				}
@@ -684,44 +750,6 @@ static vector<OutputInfo> setups_to_outputs(Card& card, ResourceManager& resman,
 				output.mode = output.connector->get_default_mode();
 				outputs.push_back(output);
 			}
-		}
-	}
-
-	for (OutputInfo& o : outputs) {
-		get_props(card, o.conn_props, o.connector);
-
-		if (!o.crtc)
-			get_default_crtc(resman, o);
-
-		get_props(card, o.crtc_props, o.crtc);
-
-		if (!o.mode.valid())
-			EXIT("Mode not valid for %s", o.connector->fullname().c_str());
-
-		if (card.has_atomic()) {
-			if (o.planes.empty())
-				add_default_planeinfo(&o);
-		} else {
-			if (o.legacy_fbs.empty())
-				o.legacy_fbs = get_default_fb(card, o.mode.hdisplay, o.mode.vdisplay);
-		}
-
-		for (PlaneInfo& p : o.planes) {
-			if (p.fbs.empty())
-				p.fbs = get_default_fb(card, p.w, p.h);
-		}
-
-		for (PlaneInfo& p : o.planes) {
-			if (!p.plane) {
-				if (card.has_atomic())
-					p.plane = resman.reserve_generic_plane(o.crtc, p.fbs[0]->format());
-				else
-					p.plane = resman.reserve_overlay_plane(o.crtc, p.fbs[0]->format());
-
-				if (!p.plane)
-					EXIT("Failed to find available plane");
-			}
-			get_props(card, p.props, p.plane);
 		}
 	}
 
@@ -1328,16 +1356,20 @@ int main(int argc, char** argv)
 	vector<OutputInfo> outputs = setups_to_outputs(card, resman, output_args);
 
 
-    if(s_try_all_modes) {
-		for (const OutputInfo& o : outputs) {
+    if(s_try_all_modes || s_try_fallback_modes) {
+		for (OutputInfo& o : outputs) {
+			PrepareOutput(card, resman, o);
 			print_output(o);
-			fmt::print("\n...press ENTER to test mode\n");
+			fmt::print("\n...press ENTER to test {}\n", o.mode.to_string_long());
 			getchar();
 			draw_test_pattern(o);
 			set_crtcs_n_planes(card, o);
+			ReleaseOutput(card, resman, o);
 		}
 	}
 	else {
+		PrepareOutputs(card, resman, outputs);
+		
 		if (!s_flip_mode)
 			draw_test_patterns(outputs);
 
