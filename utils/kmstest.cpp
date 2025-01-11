@@ -1357,23 +1357,17 @@ int main(int argc, char** argv)
 	vector<OutputInfo> outputs = setups_to_outputs(card, resman, output_args);
 
 
-    if(s_try_all_modes || s_try_fallback_modes) {
-		for (OutputInfo& o : outputs) {
-			PrepareOutput(card, resman, o);
-			print_output(o);
+	for (OutputInfo& o : outputs) {
+		PrepareOutput(card, resman, o);
+		print_output(o);
+		if(s_try_all_modes || s_try_fallback_modes) {
 			fmt::print("\n...press ENTER to test {}\n", o.mode.to_string_long());
 			getchar();
-			draw_test_pattern(o);
-			set_crtcs_n_planes(card, o);
-			ReleaseOutput(card, resman, o);
 		}
-	}
-	else {
-		PrepareOutputs(card, resman, outputs);
-		print_outputs(outputs);
 		if (!s_flip_mode)
-			draw_test_patterns(outputs);
-		set_crtcs_n_planes(card, outputs);
+			draw_test_pattern(o);
+		set_crtcs_n_planes(card, o);
+		ReleaseOutput(card, resman, o);
 	}
 
 	fmt::print("\n...press ENTER to exit\n");
